@@ -11,6 +11,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       'https://tipashluxuries.com',
+      'https://www.tipashluxuries.com',
       'http://localhost:3000',
       'http://localhost:3001'
     ],
