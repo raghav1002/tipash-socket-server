@@ -394,14 +394,19 @@ io.on('connection', (socket) => {
   // Accept video call
   socket.on('video-accept-call', (data) => {
     const { roomId, userId } = data;
-    console.log(`📹 Video call accepted in room: ${roomId}`);
+    console.log(`📹 Video call accepted in room: ${roomId} by ${userId}`);
     
     if (videoRooms.has(roomId)) {
-      videoRooms.get(roomId).forEach((socketId) => {
-        if (socketId !== socket.id) {
-          io.to(socketId).emit('video-call-accepted', { roomId, userId });
+      const roomSockets = Array.from(videoRooms.get(roomId));
+      console.log(`📹 Broadcasting video-call-accepted to ${roomSockets.length - 1} sockets`);
+      roomSockets.forEach((targetSocketId) => {
+        if (targetSocketId !== socket.id) {
+          io.to(targetSocketId).emit('video-call-accepted', { roomId, userId });
+          console.log(`📹 Sent video-call-accepted to: ${targetSocketId}`);
         }
       });
+    } else {
+      console.log(`📹 Room ${roomId} not found for video-call-accepted!`);
     }
   });
 
