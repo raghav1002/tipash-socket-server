@@ -6,48 +6,20 @@ const PORT = process.env.PORT || 10000;
 
 const server = createServer();
 
-// Allowed origins for CORS
-const allowedOrigins = [
-  'https://tipashluxuries.com',
-  'https://www.tipashluxuries.com',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:3002'
-];
-
-// Configure CORS for production - optimized for shared hosting
+// Configure CORS for production
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
-      
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      
-      // Allow any localhost origin for development
-      if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) {
-        return callback(null, true);
-      }
-      
-      callback(new Error('Not allowed by CORS'));
-    },
+    origin: [
+      'https://tipashluxuries.com',
+      'https://www.tipashluxuries.com',
+      'http://localhost:3000',
+      'http://localhost:3001'
+    ],
     methods: ['GET', 'POST'],
     credentials: true
   },
-  // Polling first for shared hosting compatibility, WebSocket as upgrade
-  transports: ['polling', 'websocket'],
   pingTimeout: 60000,
   pingInterval: 25000,
-  allowUpgrades: true,
-  path: '/socket.io/',
-  // HTTP compression for polling transport
-  httpCompression: true,
-  // Per-message deflate for WebSocket
-  perMessageDeflate: {
-    threshold: 1024
-  }
 });
 
 // Store connected users and their socket IDs
@@ -228,15 +200,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ===== Professional Video Call Handlers =====
+// ===== Professional Video Call Handlers =====
   
-  // Store pending video offers (roomId -> { offer, callerId, callerName })
+  // Store pending video offers (roomId -> { offer, callerId, callerName, timestamp })
   const pendingVideoOffers = new Map();
+  // Store ICE candidates that arrive before answer (roomId -> Array of candidates)
+  const pendingIceCandidates = new Map();
+  // Track which users have answered in each room (to avoid duplicate answers)
+  const roomAnsweredUsers = new Map(); // roomId -> Set of socketIds that have answered
   
   // Join video room
   socket.on('join-video-room', (data) => {
     const { roomId, userId, userName, isAdmin } = data;
-    console.log(`📹 join-video-room: ${userName} (${userId}) joining ${roomId}`);
     
     if (!videoRooms.has(roomId)) {
       videoRooms.set(roomId, new Set());
@@ -248,22 +223,39 @@ io.on('connection', (socket) => {
     users.set(userId, socket.id);
     socketToUser.set(socket.id, userId);
     
-    console.log(`📹 User ${userName} (${isAdmin ? 'admin' : 'user'}) joined video room ${roomId}, socket: ${socket.id}`);
-    console.log(`📹 users map updated: ${userId} -> ${socket.id}`);
+    console.log(`📹 User ${userName} (${isAdmin ? 'admin' : 'user'}) joined video room ${roomId}`);
     
     // If admin joins, check if there's a pending offer from user
     if (isAdmin && pendingVideoOffers.has(roomId)) {
       const pending = pendingVideoOffers.get(roomId);
-      console.log(`📹 Admin joining - sending pending offer from ${pending.callerName}`);
-      socket.emit('video-offer', {
-        offer: pending.offer,
-        callerId: pending.callerId,
-        callerName: pending.callerName,
-        roomId
-      });
+      const offerAge = Date.now() - (pending.timestamp || 0);
+      
+      // Only forward offers that are less than 30 seconds old
+      if (offerAge < 30000) {
+        console.log(`📹 Admin joining - sending pending offer from ${pending.callerName} (age: ${offerAge}ms)`);
+        socket.emit('video-offer', {
+          offer: pending.offer,
+          callerId: pending.callerId,
+          callerName: pending.callerName,
+          roomId
+        });
+        
+        // Also forward any pending ICE candidates for this room
+        if (pendingIceCandidates.has(roomId)) {
+          const candidates = pendingIceCandidates.get(roomId);
+          console.log(`📹 Forwarding ${candidates.length} pending ICE candidates to admin`);
+          candidates.forEach(candidate => {
+            socket.emit('video-ice-candidate', { candidate });
+          });
+        }
+      } else {
+        console.log(`📹 Pending offer too old (${offerAge}ms), clearing it`);
+        pendingVideoOffers.delete(roomId);
+        pendingIceCandidates.delete(roomId);
+      }
     }
     
-    // Notify others in room
+    // Notify others in room about the new participant
     socket.to(roomId).emit('video-user-joined', { socketId: socket.id, userId, userName });
   });
 
@@ -285,12 +277,13 @@ io.on('connection', (socket) => {
   // Video offer
   socket.on('video-offer', (data) => {
     const { roomId, offer, callerId, callerName, targetSocketId } = data;
-    console.log(`📹 Video offer in room: ${roomId} from ${callerName} (${callerId})`);
-    console.log(`📹 targetSocketId: ${targetSocketId}`);
-    console.log(`📹 videoRooms has ${roomId}:`, videoRooms.has(roomId));
+    console.log(`📹 Video offer in room: ${roomId} from ${callerName}`);
     
-    // Store pending offer for admins who join later
-    pendingVideoOffers.set(roomId, { offer, callerId, callerName });
+    // Store pending offer for admins who join later (with timestamp)
+    pendingVideoOffers.set(roomId, { offer, callerId, callerName, timestamp: Date.now() });
+    
+    // Reset room answered users for new call
+    roomAnsweredUsers.delete(roomId);
     
     if (videoRooms.has(roomId)) {
       if (targetSocketId) {
@@ -302,7 +295,8 @@ io.on('connection', (socket) => {
           roomId
         });
       } else {
-        // Broadcast to all others in room
+        // Broadcast to all others in room (admins)
+        let sentCount = 0;
         videoRooms.get(roomId).forEach((socketId) => {
           if (socketId !== socket.id) {
             io.to(socketId).emit('video-offer', {
@@ -311,102 +305,84 @@ io.on('connection', (socket) => {
               callerName,
               roomId
             });
+            sentCount++;
           }
         });
+        console.log(`📹 Offer sent to ${sentCount} participant(s) in room ${roomId}`);
       }
-    }
-  });
-
-  // Offer ready - admin signals they're ready to receive offer
-  socket.on('offer-ready', (data) => {
-    const { roomId } = data;
-    console.log(`📹 Offer ready signal in room: ${roomId} from socket: ${socket.id}`);
-    
-    // Forward to all other users in the room (the caller)
-    if (videoRooms.has(roomId)) {
-      const roomSockets = Array.from(videoRooms.get(roomId));
-      console.log(`📹 Room ${roomId} has sockets:`, roomSockets);
-      roomSockets.forEach((targetSocketId) => {
-        if (targetSocketId !== socket.id) {
-          console.log(`📹 Forwarding offer-ready to socket: ${targetSocketId}`);
-          io.to(targetSocketId).emit('offer-ready', { roomId });
-        }
-      });
     } else {
-      console.log(`📹 Room ${roomId} not found for offer-ready!`);
+      console.log(`📹 No one in room ${roomId} yet, offer stored for later`);
     }
   });
 
   // Video answer
   socket.on('video-answer', (data) => {
     const { roomId, answer, callerId } = data;
-    console.log(`📹 Video answer in room: ${roomId}, for caller: ${callerId}`);
-    console.log(`📹 Answer type:`, answer?.type);
-    console.log(`📹 Current users map:`, Array.from(users.entries()));
-    console.log(`📹 Current videoRooms:`, Array.from(videoRooms.entries()).map(([k, v]) => [k, Array.from(v)]));
+    console.log(`📹 Video answer in room: ${roomId}`);
+    
+    // Track who has answered to prevent duplicate answers
+    if (!roomAnsweredUsers.has(roomId)) {
+      roomAnsweredUsers.set(roomId, new Set());
+    }
+    roomAnsweredUsers.get(roomId).add(socket.id);
     
     // Clear pending offer since answer was received
     pendingVideoOffers.delete(roomId);
+    // Clear pending ICE candidates since answer was received
+    pendingIceCandidates.delete(roomId);
     
-    // Try to send to specific caller first
     const callerSocketId = users.get(callerId);
-    console.log(`📹 Looking up callerId ${callerId}, found socket: ${callerSocketId}`);
-    
     if (callerSocketId) {
-      io.to(callerSocketId).emit('video-answer', { answer, roomId });
-      console.log(`📹 Answer sent to caller socket: ${callerSocketId}`);
+      io.to(callerSocketId).emit('video-answer', { answer, answererId: socket.id });
+      console.log(`📹 Answer forwarded to caller ${callerId}`);
     } else {
-      // Fallback: broadcast to all others in the room
-      console.log(`📹 Caller not found by ID, broadcasting to room: ${roomId}`);
-      if (videoRooms.has(roomId)) {
-        const roomSockets = Array.from(videoRooms.get(roomId));
-        console.log(`📹 Room sockets:`, roomSockets);
-        roomSockets.forEach((socketId) => {
-          if (socketId !== socket.id) {
-            console.log(`📹 Broadcasting answer to socket: ${socketId}`);
-            io.to(socketId).emit('video-answer', { answer, roomId });
-          }
-        });
-      } else {
-        console.log(`📹 Video room ${roomId} not found!`);
-      }
+      console.log(`📹 Could not find caller socket for ${callerId}`);
     }
   });
 
   // Video ICE candidate
   socket.on('video-ice-candidate', (data) => {
     const { roomId, candidate } = data;
-    console.log(`📹 ICE candidate in room: ${roomId}, candidate:`, candidate?.candidate?.substring(0, 50));
     
     if (videoRooms.has(roomId)) {
-      const roomSockets = Array.from(videoRooms.get(roomId));
-      console.log(`📹 Forwarding ICE to ${roomSockets.length - 1} other sockets`);
-      roomSockets.forEach((targetSocketId) => {
-        if (targetSocketId !== socket.id) {
-          io.to(targetSocketId).emit('video-ice-candidate', { candidate });
+      // Forward to all others in the room
+      let forwardedCount = 0;
+      videoRooms.get(roomId).forEach((socketId) => {
+        if (socketId !== socket.id) {
+          io.to(socketId).emit('video-ice-candidate', { candidate });
+          forwardedCount++;
         }
       });
+      
+      if (forwardedCount === 0) {
+        // No one to forward to yet, store for later
+        if (!pendingIceCandidates.has(roomId)) {
+          pendingIceCandidates.set(roomId, []);
+        }
+        pendingIceCandidates.get(roomId).push(candidate);
+        console.log(`📹 Stored ICE candidate for room ${roomId} (no recipients yet)`);
+      }
     } else {
-      console.log(`📹 ICE: Room ${roomId} not found!`);
+      // Room doesn't exist yet, store for later
+      if (!pendingIceCandidates.has(roomId)) {
+        pendingIceCandidates.set(roomId, []);
+      }
+      pendingIceCandidates.get(roomId).push(candidate);
+      console.log(`📹 Stored ICE candidate for room ${roomId} (room not created yet)`);
     }
   });
 
   // Accept video call
   socket.on('video-accept-call', (data) => {
     const { roomId, userId } = data;
-    console.log(`📹 Video call accepted in room: ${roomId} by ${userId}`);
+    console.log(`📹 Video call accepted in room: ${roomId}`);
     
     if (videoRooms.has(roomId)) {
-      const roomSockets = Array.from(videoRooms.get(roomId));
-      console.log(`📹 Broadcasting video-call-accepted to ${roomSockets.length - 1} sockets`);
-      roomSockets.forEach((targetSocketId) => {
-        if (targetSocketId !== socket.id) {
-          io.to(targetSocketId).emit('video-call-accepted', { roomId, userId });
-          console.log(`📹 Sent video-call-accepted to: ${targetSocketId}`);
+      videoRooms.get(roomId).forEach((socketId) => {
+        if (socketId !== socket.id) {
+          io.to(socketId).emit('video-call-accepted', { roomId, userId });
         }
       });
-    } else {
-      console.log(`📹 Room ${roomId} not found for video-call-accepted!`);
     }
   });
 
@@ -417,10 +393,17 @@ io.on('connection', (socket) => {
     
     if (videoRooms.has(roomId)) {
       videoRooms.get(roomId).forEach((socketId) => {
-        io.to(socketId).emit('video-call-ended', { reason: 'Call ended by ' + userId });
+        if (socketId !== socket.id) {
+          io.to(socketId).emit('video-call-ended', { reason: 'Call ended by ' + userId });
+        }
       });
       videoRooms.delete(roomId);
     }
+    
+    // Clean up pending data
+    pendingVideoOffers.delete(roomId);
+    pendingIceCandidates.delete(roomId);
+    roomAnsweredUsers.delete(roomId);
   });
 
   // Incoming video call notification
@@ -481,6 +464,7 @@ io.on('connection', (socket) => {
   // Handle disconnect
   socket.on('disconnect', () => {
     const userId = socketToUser.get(socket.id);
+    const videoRoomId = socketToVideoRoom.get(socket.id);
     
     if (userId) {
       users.delete(userId);
@@ -494,7 +478,23 @@ io.on('connection', (socket) => {
       console.log(`👋 User disconnected: ${userId}`);
     }
     
-    // Remove from all rooms
+    // Remove from video rooms and notify others
+    if (videoRoomId && videoRooms.has(videoRoomId)) {
+      videoRooms.get(videoRoomId).delete(socket.id);
+      socket.to(videoRoomId).emit('video-user-left', { socketId: socket.id, userId });
+      socketToVideoRoom.delete(socket.id);
+      
+      // If room is now empty, clean up pending data
+      if (videoRooms.get(videoRoomId).size === 0) {
+        videoRooms.delete(videoRoomId);
+        pendingVideoOffers.delete(videoRoomId);
+        pendingIceCandidates.delete(videoRoomId);
+        roomAnsweredUsers.delete(videoRoomId);
+        console.log(`📹 Cleaned up empty video room: ${videoRoomId}`);
+      }
+    }
+    
+    // Remove from all regular rooms
     rooms.forEach((socketIds, roomId) => {
       if (socketIds.has(socket.id)) {
         socketIds.delete(socket.id);
