@@ -525,7 +525,16 @@ io.on('connection', (socket) => {
   });
 });
 
+// Health check endpoint
+server.on('request', (req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
+  }
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Socket.io server running on port ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📍 Health check: https://tipash-socket-server.onrender.com/health`);
 });
