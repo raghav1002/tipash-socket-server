@@ -250,6 +250,8 @@ io.on('connection', (socket) => {
           candidates.forEach(candidate => {
             socket.emit('video-ice-candidate', { candidate });
           });
+          // Clear after sending
+          pendingIceCandidates.delete(roomId);
         }
       } else {
         console.log(`📹 Pending offer too old (${offerAge}ms), clearing it`);
@@ -257,6 +259,20 @@ io.on('connection', (socket) => {
         pendingIceCandidates.delete(roomId);
       }
     }
+    
+    // Also send any pending ICE candidates to the joining user (for both admin and regular users)
+    if (pendingIceCandidates.has(roomId)) {
+      const candidates = pendingIceCandidates.get(roomId);
+      console.log(`📹 Forwarding ${candidates.length} pending ICE candidates to ${userName}`);
+      candidates.forEach(candidate => {
+        socket.emit('video-ice-candidate', { candidate });
+      });
+      // Clear after sending to avoid duplicates
+      pendingIceCandidates.delete(roomId);
+    }
+    
+    // Notify others in the room about new participant
+    socket.to(roomId).emit('room-participant-joined', { userId, userName, isAdmin, socketId: socket.id });
     
     // Notify others in room about the new participant
     socket.to(roomId).emit('video-user-joined', { socketId: socket.id, userId, userName });
