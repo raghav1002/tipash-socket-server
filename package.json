@@ -1,18 +1,16 @@
 {
-  "name": "server",
+  "name": "tipash-socket-server",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Socket.io server for Tipash Luxuries video calling",
+  "main": "socket-server.js",
   "scripts": {
-    "dev": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node socket-server.js",
+    "dev": "node socket-server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3"
+    "socket.io": "^4.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
