@@ -20,6 +20,9 @@ const io = new Server(server, {
   },
   pingTimeout: 60000,
   pingInterval: 25000,
+  transports: ['websocket', 'polling'],
+  allowUpgrades: true,
+  perMessageDeflate: false,
 });
 
 // Store connected users and their socket IDs
